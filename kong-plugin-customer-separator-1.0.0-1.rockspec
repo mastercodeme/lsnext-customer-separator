@@ -14,7 +14,7 @@ description = {
 }
 
 source = {
-  url = "",
+  url = "https://github.com/mastercodeme/lsnext-customer-separator",
   tag = "1.0.0"
 }
 
