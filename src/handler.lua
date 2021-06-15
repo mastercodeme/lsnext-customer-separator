@@ -12,6 +12,9 @@ local url = require("socket.url")
 local HTTP = "http"
 local HTTPS = "https"
 
+local COHORT_NEW = "NEW"
+local COHORT_OLD = "OLD"
+
 
 local get_headers = ngx.req.get_headers
 local get_uri_args = ngx.req.get_uri_args
@@ -34,8 +37,8 @@ local function make_request(host, path)
   read_body()
   local body_data = get_body()
 
-  headers["x-target-uri"] = ngx.var.request_uri
-  headers["x-target-method"] = ngx.var.request_method
+  headers["origin-uri"] = ngx.var.request_uri
+  headers["origin-method"] = ngx.var.request_method
 
   local raw_json_headers = JSON:encode(headers)
   local raw_json_body_data = JSON:encode(body_data)
@@ -89,10 +92,9 @@ end --]]
 function plugin:access(plugin_conf)
   
   -- DEBUG
-  kong.log.inspect(plugin_conf)   
+  --kong.log.inspect(plugin_conf)   
   
   local name = "[customer-separator]"
-  local cohort, uri
   local ok, err
   
   local scheme = plugin_conf.customer_separator_service_scheme
@@ -105,29 +107,31 @@ function plugin:access(plugin_conf)
   ok, err = sock:connect(host, port)
   if not ok then
     ngx.log(ngx.ERR, name .. " failed to connect to " .. host .. ":" .. tostring(port) .. ": ", err)
-    return
+    return kong.response.exit(500, err)
   end
 
   if scheme == HTTPS then
     local _, err = sock:sslhandshake(true, customer_separator_service_host, false)
     if err then
       ngx.log(ngx.ERR, name .. " failed to do SSL handshake with " .. host .. ":" .. tostring(port) .. ": ", err)
+      return kong.response.exit(500, err)
     end
   end
 
   local request = make_request(host, path)
   -- DEBUG
-  kong.log.inspect(request)   
+  --kong.log.inspect(request)   
   ok, err = sock:send(request)
   if not ok then
     ngx.log(ngx.ERR, name .. " failed to send data to " .. host .. ":" .. tostring(port) .. ": ", err)
+    return kong.response.exit(500, err)
   end
 
   local line, err = sock:receive("*l")
 
   if err then 
     ngx.log(ngx.ERR, name .. " failed to read response status from " .. host .. ":" .. tostring(port) .. ": ", err)
-    return
+    return kong.response.exit(500, err)
   end
 
   local status_code = tonumber(string.match(line, "%s(%d%d%d)%s"))
@@ -137,7 +141,7 @@ function plugin:access(plugin_conf)
     line, err = sock:receive("*l")
     if err then
       ngx.log(ngx.ERR, name .. " failed to read header " .. host .. ":" .. tostring(port) .. ": ", err)
-      return
+      return kong.response.exit(500, err)
     end
 
     local pair = ngx_re_match(line, "(.*):\\s*(.*)", "jo")
@@ -150,34 +154,32 @@ function plugin:access(plugin_conf)
   local body, err = sock:receive(tonumber(headers['content-length']))
   if err then
     ngx.log(ngx.ERR, name .. " failed to read body " .. host .. ":" .. tostring(port) .. ": ", err)
-    return
+    return kong.response.exit(500, err)
   end
 
   -- DEBUG
-  kong.log.inspect(status_code)
+  --kong.log.inspect(status_code)
+  --kong.log.inspect(body)
   if status_code > 299 then
     if err then 
       ngx.log(ngx.ERR, name .. " failed to read response from " .. host .. ":" .. tostring(port) .. ": ", err)
+      return kong.response.exit(500, err)
     end
   else
-    local response_body = string.match(body, "%b{}")
-    -- DEBUG
-    kong.log.inspect(response_body)
-
-    -- TODO: Установить cohort на основании ответа
+    if not is_empty(body)
+    then
+      kong.service.request.set_header(plugin_conf.response_header, body)
+      
+      if (body == COHORT_NEW)
+      then
+        kong.service.request.set_path(plugin_conf.alternate_service_path)
+        kong.service.request.set_scheme(plugin_conf.alternate_service_scheme)
+        kong.service.set_target(plugin_conf.alternate_service_host, plugin_conf.alternate_service_port)
+      end
+    end
   end
 
------------
-
-  if (not is_empty(cohort) and cohort == "NEW")
-  then
-    kong.service.request.set_header(plugin_conf.response_header, cohort)
-    
-    ngx.var.upstream_uri = plugin_conf.new_cohort_service_uri
-    ngx.redirect(replace, 302)
-  end
-  
-end --]]
+end
 
 
 --[[ runs in the 'header_filter_by_lua_block'
@@ -207,5 +209,4 @@ function plugin:log(plugin_conf)
 end --]]
 
 
--- return our plugin object
 return plugin

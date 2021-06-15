@@ -33,9 +33,22 @@ local schema = {
               default = 60, 
               type = "number",
               gt = 0 } },
-          { new_cohort_service_uri = { 
+          { alternate_service_scheme = { 
+              required = true,
+              type = "string",
+              default = "http",
+              one_of = {"http", "https"} } },
+          { alternate_service_host = { 
               type = "string",
               required = true } },
+          { alternate_service_path = { 
+              type = "string",
+              required = true } },
+          { alternate_service_port = { 
+              type = "number",
+              default = 80,
+              required = true,
+              gt = 0 } },
         }
       },
     },
