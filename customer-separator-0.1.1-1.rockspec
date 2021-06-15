@@ -1,6 +1,6 @@
 local plugin_name = "customer-separator"
-local package_name = "kong-plugin-" .. plugin_name
-local package_version = "1.0.0"
+local package_name = plugin_name
+local package_version = "0.1.1"
 local rockspec_revision = "1"
 
 
@@ -15,7 +15,7 @@ description = {
 
 source = {
   url = "https://github.com/mastercodeme/lsnext-customer-separator",
-  tag = "1.0.0"
+  tag = "0.1.1"
 }
 
 dependencies = {
@@ -25,7 +25,8 @@ dependencies = {
 build = {
   type = "builtin",
   modules = {
-    ["kong.plugins."..plugin_name..".handler"] = "./src/handler.lua",
-    ["kong.plugins."..plugin_name..".schema"] = "./src/schema.lua",
+    ["kong.plugins." .. plugin_name .. ".handler"] = "./src/handler.lua",
+    ["kong.plugins." .. plugin_name .. ".schema"] = "./src/schema.lua",
+    ["kong.plugins." .. plugin_name .. ".json"] = "./src/json.lua",
   }
 }

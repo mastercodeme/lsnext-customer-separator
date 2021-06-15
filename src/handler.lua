@@ -1,36 +1,61 @@
--- If you're not sure your plugin is executing, uncomment the line below and restart Kong
--- then it will throw an error which indicates the plugin is being loaded at least.
-
---assert(ngx.get_phase() == "timer", "The world is coming to an end!")
-
----------------------------------------------------------------------------------------------
--- In the code below, just remove the opening brackets; `[[` to enable a specific handler
---
--- The handlers are based on the OpenResty handlers, see the OpenResty docs for details
--- on when exactly they are invoked and what limitations each handler has.
----------------------------------------------------------------------------------------------
-
-
 local plugin = {
-  PRIORITY = 1000, -- set the plugin priority, which determines plugin execution order
-  VERSION = "1.0",
+  PRIORITY = 900, 
+  VERSION = "0.1.1",
 }
 
+local plugin_name = ({...})[1]:match("^kong%.plugins%.([^%.]+)")
 
-local json = require("cjson")
+local JSON = require("kong.plugins." .. plugin_name .. ".json")
 local url = require("socket.url")
 
 
--- do initialization here, any module level code runs in the 'init_by_lua_block',
--- before worker processes are forked. So anything you add here will run once,
--- but be available in all workers.
+local HTTP = "http"
+local HTTPS = "https"
 
 
--- handles more initialization, but AFTER the worker process has been forked/created.
--- It runs in the 'init_worker_by_lua_block'
+local get_headers = ngx.req.get_headers
+local get_uri_args = ngx.req.get_uri_args
+local read_body = ngx.req.read_body
+local get_body = ngx.req.get_body_data
+local get_method = ngx.req.get_method
+local ngx_re_match = ngx.re.match
+local ngx_re_find = ngx.re.find
+
+
+local function is_empty(str)
+  return str == nil or str == ''
+end
+
+local function make_request(host, path)
+  local headers = get_headers()
+  local uri_args = get_uri_args()
+  local next = next
+  
+  read_body()
+  local body_data = get_body()
+
+  headers["x-target-uri"] = ngx.var.request_uri
+  headers["x-target-method"] = ngx.var.request_method
+
+  local raw_json_headers = JSON:encode(headers)
+  local raw_json_body_data = JSON:encode(body_data)
+
+  local raw_json_uri_args
+  if next(uri_args) then 
+    raw_json_uri_args = JSON:encode(uri_args) 
+  else
+    raw_json_uri_args = "{}"
+  end
+
+  local payload_body = [[{"headers":]] .. raw_json_headers .. [[,"query_params":]] .. raw_json_uri_args.. [[,"body_data":]] .. raw_json_body_data .. [[}]]
+  local payload_headers = string.format("POST %s HTTP/1.1\r\nHost: %s\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nContent-Length: %s\r\n",
+    path, host, #payload_body)
+  
+  return string.format("%s\r\n%s", payload_headers, payload_body)
+end
+
 function plugin:init_worker()
 
-  -- your custom code here
   kong.log.debug("plugin 'customer-separator' successfully loaded")
 
 end --]]
@@ -63,19 +88,20 @@ end --]]
 -- runs in the 'access_by_lua_block'
 function plugin:access(plugin_conf)
   
+  -- DEBUG
   kong.log.inspect(plugin_conf)   
   
   local name = "[customer-separator]"
   local cohort, uri
   local ok, err
   
-  local parsed_uri = parse_url(plugin_conf.customer_separator_service_uri)
-  local scheme = parsed_uri.scheme
-  local host = parsed_uri.host
-  local port = tonumber(parsed_uri.port)
+  local scheme = plugin_conf.customer_separator_service_scheme
+  local host = plugin_conf.customer_separator_service_host
+  local path = plugin_conf.customer_separator_service_path
+  local port = tonumber(plugin_conf.customer_separator_service_port)
 
   local sock = ngx.socket.tcp()
-  sock:settimeout(plugin_conf.customer_separator_service_timeout_seconds)
+  sock:settimeout(plugin_conf.customer_separator_service_timeout_seconds * 1000)
   ok, err = sock:connect(host, port)
   if not ok then
     ngx.log(ngx.ERR, name .. " failed to connect to " .. host .. ":" .. tostring(port) .. ": ", err)
@@ -89,7 +115,10 @@ function plugin:access(plugin_conf)
     end
   end
 
-  ok, err = sock:send(payload)
+  local request = make_request(host, path)
+  -- DEBUG
+  kong.log.inspect(request)   
+  ok, err = sock:send(request)
   if not ok then
     ngx.log(ngx.ERR, name .. " failed to send data to " .. host .. ":" .. tostring(port) .. ": ", err)
   end
@@ -124,33 +153,28 @@ function plugin:access(plugin_conf)
     return
   end
 
+  -- DEBUG
+  kong.log.inspect(status_code)
   if status_code > 299 then
     if err then 
       ngx.log(ngx.ERR, name .. " failed to read response from " .. host .. ":" .. tostring(port) .. ": ", err)
     end
+  else
+    local response_body = string.match(body, "%b{}")
+    -- DEBUG
+    kong.log.inspect(response_body)
 
-    local response_body = JSON:decode(string.match(body, "%b{}"))
-    --kong.log.debug("customer-separator response:"..response_body)
+    -- TODO: Установить cohort на основании ответа
   end
 
 -----------
 
-  if not is_empty(cohort)
+  if (not is_empty(cohort) and cohort == "NEW")
   then
-    if cohort == "NEW"
-    then
-      uri = plugin_conf.new_cohort_service_uri
-    else
-      uri = plugin_conf.old_cohort_service_uri
-    end
-  
     kong.service.request.set_header(plugin_conf.response_header, cohort)
     
-    ngx.var.upstream_uri = uri
+    ngx.var.upstream_uri = plugin_conf.new_cohort_service_uri
     ngx.redirect(replace, 302)
-    
-    --kong.log.debug("recognized cohort:"..cohort)
-    --kong.log.debug("recognized uri:"..uri)
   end
   
 end --]]
@@ -182,24 +206,6 @@ function plugin:log(plugin_conf)
 
 end --]]
 
-local function parse_url(host_url)
-  local parsed_url = url.parse(host_url)
-  if not parsed_url.port then
-    if parsed_url.scheme == HTTP then
-      parsed_url.port = 80
-     elseif parsed_url.scheme == HTTPS then
-      parsed_url.port = 443
-     end
-  end
-  if not parsed_url.path then
-    parsed_url.path = "/"
-  end
-  return parsed_url
-end
-
-local function is_empty(str)
-  return str == nil or str == ''
-end
 
 -- return our plugin object
 return plugin
